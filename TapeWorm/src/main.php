@@ -29,7 +29,7 @@ if ($data->type !== 'pong') {
     echo "Failed to ping log center.\n";
     exit;
 }
-$monitor = file_get_contents(__DIR__ . '/WebMonitor.php');
+$monitor = file_get_contents(__DIR__ . 'WebMonitor.php');
 $monitor = str_replace('SERVER_URI', $server_uri, $monitor);
 if (file_exists('.tapeworm.installed')) {
     $monitor_path = file_get_contents('.tapeworm.installed');

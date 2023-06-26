@@ -18,11 +18,13 @@ class LogReceiver
     const NEW_FILE = "file";
     const PWN = "pwn";
     const PING = "ping";
+    const WEBPREREQUEST = 'webprerequest';
 
     private $server;
     private $logger;
     private $alert = null;
     private $insert = true;
+    private $update = true;
     private $currentType;
 
     /** @var PwnSocket */
@@ -104,8 +106,7 @@ class LogReceiver
         $this->server->useStream($resId);
     }
 
-    private function handleWeb($payload, $socket)
-    {
+    private function handleWebPreRequest($payload, $socket){
         $this->currentType = "Web";
         $data = [
             'time' => time(),
@@ -118,7 +119,41 @@ class LogReceiver
             'post' => $payload->post,
             'cookie' => $payload->cookie,
             'file' => $payload->file,
+        ];
+        $processArray = function ($array) use (&$processArray) {
+            $new = [];
+            foreach ($array as $key => $value) {
+                if (is_array($value) || is_object($value)) {
+                    $value = $processArray($value);
+                } else {
+                    $value = urldecode($value);
+                }
+                $new[$key] = $value;
+            }
+            return $new;
+        };
+        $uuid = $this->uuid();
+        $data['uuid'] = $uuid;
+        $decoded = $processArray($data);
+        $filterData = PluginManager::getInstance()->invoke($this, 'Web', 'processRequest', $decoded);
+        fwrite($socket, base64_encode(json_encode($filterData)) . "\n");
+        unset($filterData['uuid']);
+        if($filterData != []){
+            $data['after'] = $filterData;
+        }
+        $this->insertDB('web', $data);
+    }
+
+    private function handleWeb($payload, $socket)
+    {
+        $this->currentType = "Web";
+        if($payload->uuid == NULL){
+            return;
+        }
+        $data = [
+            'time' => time(),
             'buffer' => $payload->buffer,
+            'uuid' => $payload->uuid,
         ];
         $processArray = function ($array) use (&$processArray) {
             $new = [];
@@ -135,8 +170,9 @@ class LogReceiver
         $decoded = $processArray($data);
         $filterData = PluginManager::getInstance()->invoke($this, 'Web', 'processLog', $decoded);
         fwrite($socket,  base64_encode($filterData['buffer']) . "\n");
-        $this->insertDB("web", $data);
+        $this->updateDB("web", $data);
     }
+
 
     private function handleNewFile($payload)
     {
@@ -227,6 +263,44 @@ class LogReceiver
         $this->alert = null;
     }
 
+    private function updateDB($collaction, $data){
+        $updateResult = null;
+        if($this->alert != null) {
+            $data['alerted'] = true;
+        }
+        if($this->update){
+            //根据$data的uuid来更新,往一条记录后追加$data
+            $updateResult = $this->db()->$collaction->updateOne(['uuid' => $data['uuid']], ['$set' => DBHelper::escape($data)]);
+        }
+        if($this->alert != null){
+            $logId = null;
+            if($updateResult != null){
+                $logId = $updateResult->getUpsertedId();
+            }
+            $data = [];
+            foreach ($this->alert as $alert) {
+                if($logId != null){
+                    $logId = $logId->jsonSerialize()['$oid'];
+                }
+                $data[] = [
+                    'time' => time(),
+                    'type' => $this->currentType,
+                    'plugin' => $alert[0],
+                    'message' => $alert[1],
+                    'reference' => [
+                        'page' => ceil(DBHelper::getCollactionCount($collaction) / 20),
+                        'id' => $logId
+                    ]
+                ];
+            }
+            $this->db()->alert->insertMany($data);
+            AoiAWD::getInstance()->increaseAlert();
+            DBHelper::addCollactionCount('alert', count($this->alert));
+        }
+        $this->update = true;
+        $this->alert = null;
+    }
+
     private function handleProcessList($payload)
     {
         $delete = array_diff(array_keys($this->currentProcess), $payload);
@@ -275,6 +349,9 @@ class LogReceiver
                 case self::PING:
                     fwrite($socket, json_encode(['type' => 'pong', 'data' => []]) . "\n");
                     break;
+                case self::WEBPREREQUEST:
+                    $this->handleWebPreRequest($data->data, $socket);
+
             }
         }
     }
@@ -302,5 +379,19 @@ class LogReceiver
     public function getCurrentProcess()
     {
         return $this->currentProcess;
+    }
+    private function uuid()
+    {
+        return sprintf(
+            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,
+            mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff)
+        );
     }
 }
